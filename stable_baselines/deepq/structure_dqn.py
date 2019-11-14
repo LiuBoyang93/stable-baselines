@@ -13,12 +13,12 @@ from stable_baselines.common import (
 )
 from stable_baselines.common.vec_env import VecEnv
 from stable_baselines.common.schedules import LinearSchedule
-from stable_baselines.deepq.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
+from stable_baselines.deepq.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer, SupervisedReplayBuffer
 from stable_baselines.deepq.policies import DQNPolicy
 from stable_baselines.a2c.utils import total_episode_reward_logger
 
 
-class DQN(OffPolicyRLModel):
+class StructureDQN(OffPolicyRLModel):
     """
     The DQN model class.
     DQN paper: https://arxiv.org/abs/1312.5602
@@ -86,10 +86,11 @@ class DQN(OffPolicyRLModel):
         policy_kwargs=None,
         full_tensorboard_log=False,
         seed=None,
+        supervised_buffer_size=1000,
     ):
 
         # TODO: replay_buffer refactoring
-        super(DQN, self).__init__(
+        super(StructureDQN, self).__init__(
             policy=policy,
             env=env,
             replay_buffer=None,
@@ -119,6 +120,7 @@ class DQN(OffPolicyRLModel):
         self.tensorboard_log = tensorboard_log
         self.full_tensorboard_log = full_tensorboard_log
         self.double_q = double_q
+        self.supervised_buffer_size = supervised_buffer_size
 
         self.graph = None
         self.sess = None
@@ -133,6 +135,8 @@ class DQN(OffPolicyRLModel):
         self.params = None
         self.summary = None
         self.episode_reward = None
+        self.positive_replay_buffer = None
+        self.negative_replay_buffer = None
 
         if _init_setup_model:
             self.setup_model()
@@ -199,6 +203,11 @@ class DQN(OffPolicyRLModel):
         replay_wrapper=None,
     ):
 
+        mb_obs, mb_reward, mb_next_obs, mb_actions, mb_done = [], [], [], [], []
+
+        pos_threshold = None
+        neg_threshold = None
+
         new_tb_log = self._init_num_timesteps(reset_num_timesteps)
 
         with SetVerbosity(self.verbose), TensorboardWriter(
@@ -242,6 +251,9 @@ class DQN(OffPolicyRLModel):
             obs = self.env.reset()
             reset = True
             self.episode_reward = np.zeros((1,))
+            self.positive_replay_buffer = SupervisedReplayBuffer(self.supervised_buffer_size)
+            self.negative_replay_buffer = SupervisedReplayBuffer(self.supervised_buffer_size)
+
 
             for _ in range(total_timesteps):
                 if callback is not None:
@@ -280,6 +292,11 @@ class DQN(OffPolicyRLModel):
                 new_obs, rew, done, info = self.env.step(env_action)
                 # Store transition in the replay buffer.
                 self.replay_buffer.add(obs, action, rew, new_obs, float(done))
+                mb_obs.append(obs)
+                mb_next_obs.append(new_obs)
+                mb_actions.append(action)
+                mb_reward.append(rew)
+                mb_done.append(float(done))
                 obs = new_obs
 
                 if writer is not None:
@@ -292,6 +309,26 @@ class DQN(OffPolicyRLModel):
                 episode_rewards[-1] += rew
                 if done:
                     maybe_is_success = info.get("is_success")
+                    if len(episode_rewards) > 100:
+                        pos_threshold = np.percentile(np.array(episode_rewards.copy()), 75)
+                        neg_threshold = np.percentile(np.array(episode_rewards.copy()), 50)
+
+                    if pos_threshold and episode_rewards[-1] > pos_threshold:
+                        # reverse_reward = mb_reward[::-1]  # reverse reward
+                        for i in range(len(mb_reward)):
+                            # mb_episode_reward.append(np.sum(reverse_reward[i:]))
+                            self.positive_replay_buffer.add(obs_t=mb_obs[i],
+                                                            action=mb_actions[i],
+                                                            obs_tp1=mb_next_obs[i])
+
+                    if neg_threshold and episode_rewards[-1] < neg_threshold:
+                        # reverse_reward = mb_reward[::-1]  # reverse reward
+                        for i in range(len(mb_reward)):
+                            # mb_episode_reward.append(np.sum(reverse_reward[i:]))
+                            self.negative_replay_buffer.add(obs_t=mb_obs[i],
+                                                            action=mb_actions[i],
+                                                            obs_tp1=mb_next_obs[i],
+                                                            )
                     if maybe_is_success is not None:
                         episode_successes.append(float(maybe_is_success))
                     if not isinstance(self.env, VecEnv):
