@@ -11,8 +11,10 @@
 __pycache__/
 _build/
 *.npz
-
-# Setuptools distribution and build folders.
+*.csv
+*.png
+*.pdf
+# setuptools distribution and build folders.
 /dist/
 /build
 keys/

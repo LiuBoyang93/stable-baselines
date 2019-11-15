@@ -1,4 +1,5 @@
 from functools import partial
+from tqdm import tqdm
 
 import tensorflow as tf
 import numpy as np
@@ -16,7 +17,9 @@ from stable_baselines.common.schedules import LinearSchedule
 from stable_baselines.deepq.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer, SupervisedReplayBuffer
 from stable_baselines.deepq.policies import DQNPolicy
 from stable_baselines.a2c.utils import total_episode_reward_logger
-
+from stable_baselines.deepq.build_graph_SDQN import build_train, build_act, build_act_with_param_noise
+from stable_baselines.deepq.shaperNet import Shaper
+# from stable_baselines.deepq.tf2np import TF2NP
 
 class StructureDQN(OffPolicyRLModel):
     """
@@ -86,7 +89,10 @@ class StructureDQN(OffPolicyRLModel):
         policy_kwargs=None,
         full_tensorboard_log=False,
         seed=None,
+        positive_threshold=None,
+        negative_threshold=None,
         supervised_buffer_size=1000,
+
     ):
 
         # TODO: replay_buffer refactoring
@@ -121,6 +127,8 @@ class StructureDQN(OffPolicyRLModel):
         self.full_tensorboard_log = full_tensorboard_log
         self.double_q = double_q
         self.supervised_buffer_size = supervised_buffer_size
+        self.positive_threshold = positive_threshold
+        self.negative_threshold = negative_threshold
 
         self.graph = None
         self.sess = None
@@ -137,6 +145,7 @@ class StructureDQN(OffPolicyRLModel):
         self.episode_reward = None
         self.positive_replay_buffer = None
         self.negative_replay_buffer = None
+        self.shaper = None
 
         if _init_setup_model:
             self.setup_model()
@@ -172,7 +181,7 @@ class StructureDQN(OffPolicyRLModel):
 
                 optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
 
-                self.act, self._train_step, self.update_target, self.step_model = deepq.build_train(
+                self.act, self._train_step, self.update_target, self.step_model = build_train(
                     q_func=partial(self.policy, **self.policy_kwargs),
                     ob_space=self.observation_space,
                     ac_space=self.action_space,
@@ -184,6 +193,8 @@ class StructureDQN(OffPolicyRLModel):
                     full_tensorboard_log=self.full_tensorboard_log,
                     double_q=self.double_q,
                 )
+
+
                 self.proba_step = self.step_model.proba_step
                 self.params = tf_util.get_trainable_vars("deepq")
 
@@ -246,6 +257,8 @@ class StructureDQN(OffPolicyRLModel):
                 final_p=self.exploration_final_eps,
             )
 
+            self.shaper = Shaper(self.env.observation_space)
+
             episode_rewards = [0.0]
             episode_successes = []
             obs = self.env.reset()
@@ -254,8 +267,7 @@ class StructureDQN(OffPolicyRLModel):
             self.positive_replay_buffer = SupervisedReplayBuffer(self.supervised_buffer_size)
             self.negative_replay_buffer = SupervisedReplayBuffer(self.supervised_buffer_size)
 
-
-            for _ in range(total_timesteps):
+            for _ in tqdm(range(total_timesteps)):
                 if callback is not None:
                     # Only stop training if return value is False, not when it is None. This is for backwards
                     # compatibility with callbacks that have no return statement.
@@ -290,6 +302,9 @@ class StructureDQN(OffPolicyRLModel):
                 env_action = action
                 reset = False
                 new_obs, rew, done, info = self.env.step(env_action)
+
+
+
                 # Store transition in the replay buffer.
                 self.replay_buffer.add(obs, action, rew, new_obs, float(done))
                 mb_obs.append(obs)
@@ -310,8 +325,15 @@ class StructureDQN(OffPolicyRLModel):
                 if done:
                     maybe_is_success = info.get("is_success")
                     if len(episode_rewards) > 100:
-                        pos_threshold = np.percentile(np.array(episode_rewards.copy()), 75)
-                        neg_threshold = np.percentile(np.array(episode_rewards.copy()), 50)
+                        # pos_threshold = np.percentile(np.array(episode_rewards.copy()), 90)
+                        # neg_threshold = np.percentile(np.array(episode_rewards.copy()), 50)
+
+                        if self.positive_threshold and self.negative_threshold:
+                            pos_threshold = self.positive_threshold
+                            neg_threshold = self.negative_threshold
+                        else:
+                            pos_threshold = np.percentile(np.array(episode_rewards), 0.9)
+                            neg_threshold = np.percentile(np.array(episode_rewards), 0.5)
 
                     if pos_threshold and episode_rewards[-1] > pos_threshold:
                         # reverse_reward = mb_reward[::-1]  # reverse reward
@@ -319,7 +341,8 @@ class StructureDQN(OffPolicyRLModel):
                             # mb_episode_reward.append(np.sum(reverse_reward[i:]))
                             self.positive_replay_buffer.add(obs_t=mb_obs[i],
                                                             action=mb_actions[i],
-                                                            obs_tp1=mb_next_obs[i])
+                                                            obs_tp1=mb_next_obs[i],
+                                                            reward=episode_rewards[-1])
 
                     if neg_threshold and episode_rewards[-1] < neg_threshold:
                         # reverse_reward = mb_reward[::-1]  # reverse reward
@@ -328,7 +351,10 @@ class StructureDQN(OffPolicyRLModel):
                             self.negative_replay_buffer.add(obs_t=mb_obs[i],
                                                             action=mb_actions[i],
                                                             obs_tp1=mb_next_obs[i],
-                                                            )
+                                                            reward=episode_rewards[-1])
+
+                    self.positive_replay_buffer.filter(threshold=pos_threshold*0.8, type='positive')
+                    self.negative_replay_buffer.filter(threshold=neg_threshold*0.8, type='negative')
                     if maybe_is_success is not None:
                         episode_successes.append(float(maybe_is_success))
                     if not isinstance(self.env, VecEnv):
@@ -359,11 +385,39 @@ class StructureDQN(OffPolicyRLModel):
                             weights,
                             batch_idxes,
                         ) = experience
+
+                        # reward shaping
+
+                        #TODO: not support for prioritized_replay right now
+
                     else:
                         obses_t, actions, rewards, obses_tp1, dones = self.replay_buffer.sample(
                             self.batch_size
                         )
+                        if self.positive_replay_buffer.can_sample(32):
+                            x_for_shaper = np.concatenate((obses_t, obses_tp1), axis=1)
+                            rew_shaper = self.shaper.prediction(x_for_shaper)
+                            # rewards_new = rewards * tf.dtypes.cast(rew_shaper[:, 0] > rew_shaper[:, 1], tf.float32)
+
+                            # fuck trash tensorflow
+                            new_rewards = self.shaper.shape_reward(rewards, rew_shaper)
+                            # rewards = self.tf2np.predict(new_rewards)
+                            rewards = new_rewards
                         weights, batch_idxes = np.ones_like(rewards), None
+
+                    if self.positive_replay_buffer.can_sample(100) and self.negative_replay_buffer.can_sample(100):
+                        pos_obs, pos_action, pos_next_obs = self.positive_replay_buffer.sample(32)
+                        x_pos = np.concatenate((pos_obs, pos_next_obs), axis=1)
+                        y_pos = np.tile([1, 0], (32, 1))
+                        neg_obs, neg_action, neg_next_obs = self.negative_replay_buffer.sample(32)
+                        x_neg = np.concatenate((neg_obs, neg_next_obs), axis=1)
+                        y_neg = np.tile([0, 1], (32, 1))
+
+                        x = np.concatenate((x_pos, x_neg), axis=0)
+                        y = np.concatenate((y_pos, y_neg), axis=0)
+
+                        loss, _, prediction = self.shaper.optimize(x=x,
+                                                                   y=y)
 
                     if writer is not None:
                         # run loss backprop with summary, but once every 100 steps save the metadata

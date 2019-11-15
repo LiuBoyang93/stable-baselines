@@ -243,7 +243,7 @@ class SupervisedReplayBuffer(object):
         """
         return len(self) == self.buffer_size
 
-    def add(self, obs_t, action, obs_tp1):
+    def add(self, obs_t, action, obs_tp1, reward):
         """
         add a new transition to the buffer
 
@@ -253,7 +253,7 @@ class SupervisedReplayBuffer(object):
         :param obs_tp1: (Any) the current observation
         :param done: (bool) is the episode done
         """
-        data = (obs_t, action, obs_tp1)
+        data = (obs_t, action, obs_tp1, reward)
 
 
         if self._next_idx >= len(self._storage):
@@ -271,7 +271,7 @@ class SupervisedReplayBuffer(object):
         obses_t, actions, obses_tp1 = [], [], []
         for i in idxes:
             data = self._storage[i]
-            obs_t, action, reward, obs_tp1, done, _ = data
+            obs_t, action, obs_tp1, _ = data
             obses_t.append(np.array(obs_t, copy=False))
             actions.append(np.array(action, copy=False))
             obses_tp1.append(np.array(obs_tp1, copy=False))
@@ -293,3 +293,23 @@ class SupervisedReplayBuffer(object):
         idxes = [random.randint(0, len(self._storage) - 1) for _ in range(batch_size)]
         return self._encode_sample(idxes)
 
+
+    def filter(self, threshold, type = "positive"):
+        """
+        remove data according to the threshold
+        :param threshold:
+        :param type: 'positive' or 'negative'
+        :return: self
+        """
+        n = self.__len__()
+        for i in range(n):
+            data = self._storage[i]
+            obs_t, action, obs_tp1, reward = data
+            if type == "positive":
+                if reward < threshold:
+                    self._storage.remove(self._storage[i])
+            elif type =="negative":
+                if reward > threshold:
+                    self._storage.remove(self._storage[i])
+            else:
+                raise Exception("the type arg can only be 'positive' or 'negative'")

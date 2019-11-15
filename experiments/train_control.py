@@ -6,7 +6,8 @@ import time
 
 from stable_baselines.common import set_global_seeds
 from stable_baselines.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-from stable_baselines.deepq import DQN, StructureDQN
+from stable_baselines.deepq.dqn import DQN
+from stable_baselines.deepq.structure_dqn import StructureDQN
 from stable_baselines.a2c import A2C
 from stable_baselines.bench import Monitor
 from stable_baselines.common.policies import register_policy
@@ -17,6 +18,7 @@ import os
 import argparse
 
 from stable_baselines.deepq.policies import MlpPolicy as DeepQPolicy
+from stable_baselines.deepq.shaperNet import Shaper
 from stable_baselines.common.policies import MlpPolicy
 
 import matplotlib.pyplot as plt
@@ -76,15 +78,15 @@ if __name__ == "__main__":
     timestep = []  # results for ppo
     reward = []
 
-    # agent_list = [DQN, A2C]"DQN": DQN,
-    agent_dict = {"StructureDQN": StructureDQN}
+    # agent_list = [DQN, A2C]"DQN": DQN,"DQN": DQN,
+    agent_dict = {"AdaptiveStructureDQN": StructureDQN, "StructureDQN": StructureDQN}
     for agent, agent_func in agent_dict.items():
         time_step = []  # time step
         reward = []  # reward
         for i in range(config.n_trail):
             log_dir = "./checkpoint/{}/{}/{}".format(agent, config.environment, seed_ls[i])
             os.makedirs(log_dir, exist_ok=True)
-
+            tf.reset_default_graph()
             # create env
             env = gym.make(config.environment)
             env.seed(seed_ls[i])
@@ -92,8 +94,13 @@ if __name__ == "__main__":
             env = DummyVecEnv([lambda: env])
 
             #  train model
-            if agent == 'DQN' or agent == 'StructureDQN':
+            if agent == 'DQN':
                 model = agent_func(DeepQPolicy, env, verbose=1)
+            elif agent == 'StructureDQN':
+                # reward_shaper = Shaper(env.observation_space, s)
+                model = agent_func(policy=DeepQPolicy, env=env, verbose=1, pos_threshold=120, neg_threshold=80)
+            elif agent == 'AdaptiveStructureDQN':
+                model = agent_func(policy=DeepQPolicy, env=env, verbose=1)
             else:
                 model = agent_func(MlpPolicy, env, verbose=1)
             time.sleep(1)

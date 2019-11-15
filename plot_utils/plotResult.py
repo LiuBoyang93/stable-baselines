@@ -140,14 +140,14 @@ if __name__ == "__main__":
     sns.set(style="darkgrid")
     game_name = "CartPole-v0"
     # lambda1_candidate = [0, 0.001, 0.01, 0.1]
-
-    agent_name = ["DQN", "A2C"]
+    save_path = "/home/liuboya2/stable-baselines/experiments/checkpoint/{}.png".format(game_name)
+    agent_name = ["AdaptiveStructureDQN","StructureDQN", "DQN", "A2C"]
 
     for i in range(len(agent_name)):
         _ = read_log(
             game=game_name,
             agent_name=agent_name[i],
-            log_path="/home/liuboya2/FactorizedHorizonRL/checkpoint/",
+            log_path="/home/liuboya2/stable-baselines/experiments/checkpoint/",
             n_seed=5,
             plot_type="agent",
             round_digit=2,
@@ -168,4 +168,5 @@ if __name__ == "__main__":
     plt.title(game_name)
     plt.xlabel("time steps")
     plt.ylabel("reward")
+    plt.savefig(save_path)
     plt.show()
